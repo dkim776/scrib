@@ -59,12 +59,19 @@ struct editorConfig {
 
 struct editorConfig E;
 
+struct abuf {
+  char *b;
+  int len;
+};
+
+#define ABUF_INIT {NULL, 0}
+
 char *original;
 char *added;
 int bufferIndex;
 int bufferSize;
 
-typedef struct list {
+typedef struct piece {
   int linecount;
   int *lines;
   int offset;
@@ -72,54 +79,77 @@ typedef struct list {
   int end;
   char *buffer;
   int bufferType;
-  struct list *next;
-  struct list *prev;
-} node;
+  struct piece *next;
+  struct piece *prev;
+} pieceNode;
 
-node *head = NULL;
-node *tail = NULL;
+pieceNode *head = NULL;
+pieceNode *tail = NULL;
 
-// node *getNewNode (char *text, int start, int end, int bufferType);
-// void insertChar (char *c, int line, int pos, int bufferType);
-// void deleteNode (int line, int pos);
-// void debugList (int opt);
-// void printList ();
-// void printlines(int topLine, int botLine, struct abuf *ab);
-void editorSetStatusMessage(const char *fmt, ...);
+typedef struct stack {
+  pieceNode *frontptr;
+  pieceNode *backptr;
+  struct stack *next;
+  struct stack *prev;
+} stackNode;
+
+stackNode *undoHead = NULL;
+stackNode *undoTail = NULL;
+
+stackNode *redoHead = NULL;
+stackNode *redoTail = NULL;
+
+/******************************************************/
+stackNode* getNewStackNode(pieceNode *front, pieceNode *backr);
+stackNode* popStack(stackNode* stack);
+int isStackEmpty(stackNode* stack);
+void pushStack(stackNode* stack, pieceNode *front, pieceNode *back);
+int countLines();
+
+pieceNode *getNewPieceNode (char *text, int start, int end, int bufferType);
+void splitNode(pieceNode *curr, int splitIndex);
+void insertChar (int line, int pos);
+void splitNodeDelete(pieceNode *curr, int splitIndex);
+void deleteChar (int line, int pos);
+void undo();
+void redo();
+
+void die(const char *s);
+void disableRawMode();
+void enableRawMode();
+
+int editorReadKey();
+int getCursorPosition(int *rows, int *cols);
+int getWindowSize(int *rows, int *cols);
+int is_separator(int c);
+
+void editorOpen(char *filename);
+void editorSave();
+
+void abAppend(struct abuf *ab, const char *s, int len);
+void abFree(struct abuf *ab);
+
+void printlines(struct abuf *ab, int topLine, int botLine);
+void editorScroll();
+void editorDrawRows(struct abuf *ab);
+void editorDrawStatusBar(struct abuf *ab);
+void editorDrawMessageBar(struct abuf *ab);
 void editorRefreshScreen();
+void editorSetStatusMessage(const char *fmt, ...);
+
+void editorMoveCursor(int key);
+void editorProcessKeypress();
 char *editorPrompt(char *prompt);
 
-void debugNode(node* curr) {
-  printf ("[(%d) %d,%d,%d]\r\n", curr->bufferType, curr->start, curr->end, curr->linecount);;
+void initEditor();
+int main(int argc, char *argv[]);
+/******************************************************/
+void debugNode(pieceNode* curr) {
+  printf ("[(%d) %d,%d,%d]\r\n", curr->bufferType, curr->start, curr->end, curr->linecount);
 }
 
-node *getNewNode (char *text, int start, int end, int bufferType){
-  int* a = (int *)calloc(1, sizeof(int));
-  int count = 0;
-  int offset = 0;
-  for (int i = start; i <= end; i++){
-    offset++;
-    if (text[i] == '\n') {
-        a[count++] = offset;
-        offset = 0;
-        a = (int *)realloc(a, (count + 1) * sizeof(int));
-    }
-  }
-
-  node *tmp = (node *) malloc (sizeof (node));
-  tmp->linecount = count;
-  tmp->lines = a;
-  tmp->start = start;
-  tmp->end = end;
-  tmp->buffer = text;
-  tmp->bufferType = bufferType;
-  //free(a);
-  return tmp;
-}
-
-// print the list in forward order
 void debugList (int opt){
-  node *curr = head;
+  pieceNode *curr = head;
   while (curr != NULL && opt == 0) {
     debugNode(curr);
     curr = curr->next;
@@ -134,28 +164,104 @@ void debugList (int opt){
     curr = curr->next;
   }
 
-  printf ("[done]\n");
-}
-
-void printList () {
-  node *curr = head;
-  while (curr != NULL) {
-    if (curr->bufferType == 0) {
-      printf("%.*s", curr->end - curr->start, curr->start + original);
-    } else {
-      printf("%.*s", curr->end - curr->start, curr->start + added);
-    }
+  while (curr != NULL && opt == 2) {
+    //printf ("[ ");
+    printf("%.*s", curr->end - curr->start, curr->start + original);
+    printf ("/");
     curr = curr->next;
   }
-  printf ("\n[done]");
+
+  printf ("\r\n");
 }
 
-void splitNode(node *curr, int splitIndex) {
-  node *front = curr->prev;
-  node *back = curr->next;
-  node *leftSplit = getNewNode(curr->buffer, curr->start, curr->start + splitIndex - 1, curr->bufferType);
-  node *newNode = getNewNode(added, bufferIndex, bufferIndex, 1);
-  node *rightSplit = getNewNode(curr->buffer, curr->start + splitIndex, curr->end, curr->bufferType);
+void debugStack(stackNode *head) {
+  stackNode* curr = head;
+  while (curr != NULL) {
+    if (curr->frontptr != NULL) debugNode(curr->frontptr);
+    if (curr->backptr != NULL) debugNode(curr->backptr);
+    curr = curr->next;
+  }
+  printf("[]\r\n");
+}
+
+stackNode* getNewStackNode(pieceNode *front, pieceNode *back) {
+    stackNode *tmp = (stackNode *) malloc(sizeof(stackNode));
+    tmp->frontptr = front;
+    tmp->backptr = back;
+    tmp->next = NULL;
+    tmp->prev = NULL;
+
+    return tmp;
+}
+
+stackNode* popStack(stackNode* stack) {
+  if (isStackEmpty(stack) > 0) {
+    stackNode *element = stack->next;
+    stack->next = element->next;
+    stack->next->prev = stack;
+    element->next = NULL;
+    element->prev = NULL;
+    return element;
+  }
+  return NULL;
+}
+
+stackNode* peekStack(stackNode* stack) {
+  return (isStackEmpty(stack) > 0) ? stack->next : NULL;
+}
+
+int isStackEmpty(stackNode* stack) {
+  return (stack->next->frontptr != NULL) ? 1 : 0;
+}
+
+void pushStack(stackNode* stack, pieceNode *front, pieceNode *back) {
+  stackNode *element = getNewStackNode(front, back);
+  element->next = stack->next;
+  element->prev = stack;
+  stack->next->prev = element;
+  stack->next = element;
+}
+
+int countLines() {
+  pieceNode *curr = head;
+  int count = 0;
+  while (curr != tail) {
+    count += curr->linecount;
+    curr = curr->next;
+  }
+  return count;
+}
+
+pieceNode *getNewPieceNode (char *text, int start, int end, int bufferType){
+  int* a = (int *)calloc(1, sizeof(int));
+  int count = 0;
+  int offset = 0;
+  for (int i = start; i <= end; i++){
+    offset++;
+    if (text[i] == '\n') {
+        a[count++] = offset;
+        offset = 0;
+        a = (int *)realloc(a, (count + 1) * sizeof(int));
+    }
+  }
+
+  pieceNode *tmp = (pieceNode *) malloc (sizeof (pieceNode));
+  tmp->linecount = count;
+  tmp->lines = a;
+  tmp->start = start;
+  tmp->end = end;
+  tmp->buffer = text;
+  tmp->bufferType = bufferType;
+  //free(a);
+  return tmp;
+}
+
+void splitNode(pieceNode *curr, int splitIndex) {
+  pieceNode *front = curr->prev;
+  pieceNode *back = curr->next;
+  pieceNode *leftSplit = getNewPieceNode(curr->buffer, curr->start, curr->start + splitIndex - 1, curr->bufferType);
+  pieceNode *newNode = getNewPieceNode(added, bufferIndex, bufferIndex, 1);
+  pieceNode *rightSplit = getNewPieceNode(curr->buffer, curr->start + splitIndex, curr->end, curr->bufferType);
 
   leftSplit->next = newNode;
   leftSplit->prev = front;
@@ -166,10 +272,12 @@ void splitNode(node *curr, int splitIndex) {
 
   front->next = leftSplit;
   back->prev = rightSplit;
+
+  pushStack(undoHead, curr, curr);
 }
 
 void insertChar (int line, int pos){
-  node *curr = head->next;
+  pieceNode *curr = head->next;
   int currLine = 1;
   while (curr != tail && currLine < line) {
     if (currLine + curr->linecount >= line) break;
@@ -205,20 +313,27 @@ void insertChar (int line, int pos){
         curr->end++;
       }
     } else if (posLeft == 0) {
-      node *newNode = getNewNode(added, bufferIndex, bufferIndex, 1);
+      pieceNode *newNode = getNewPieceNode(added, bufferIndex, bufferIndex, 1);
       newNode->next = curr->next;
       newNode->prev = curr;
       curr->next->prev = newNode;
       curr->next = newNode;
+      pushStack(undoHead, newNode, newNode);
     } else {
       splitNode(curr, splitIndex);
     }
   } else if (offset == 0 && pos == 0) {
-    node *newNode = getNewNode(added, bufferIndex, bufferIndex, 1);
+    pieceNode *deepCopy = getNewPieceNode(curr->buffer, curr->start, curr->end, curr->bufferType);
+    deepCopy->next = curr->next;
+    deepCopy->prev = curr->prev;
+
+    pieceNode *newNode = getNewPieceNode(added, bufferIndex, bufferIndex, 1);
     newNode->next = curr;
     newNode->prev = curr->prev;
     curr->prev->next = newNode;
     curr->prev = newNode;
+
+    pushStack(undoHead, deepCopy, deepCopy);
   } else {
     offset += pos;
     splitNode(curr, offset);
@@ -226,13 +341,13 @@ void insertChar (int line, int pos){
   bufferIndex++;
 }
 
-void splitNodeDelete(node *curr, int splitIndex) {
+void splitNodeDelete(pieceNode *curr, int splitIndex) {
   //printf ("[(%d),%d,%d,%d]\n", curr->bufferType, curr->start, curr->end, curr->linecount);
-  node *front = curr->prev;
-  node *back = curr->next;
-  node *leftSplit = getNewNode(curr->buffer, curr->start, curr->start + splitIndex - 2, curr->bufferType);
-  //node *newNode = getNewNode(added, bufferIndex, bufferIndex, 1);
-  node *rightSplit = getNewNode(curr->buffer, curr->start + splitIndex, curr->end, curr->bufferType);
+  pieceNode *front = curr->prev;
+  pieceNode *back = curr->next;
+  pieceNode *leftSplit = getNewPieceNode(curr->buffer, curr->start, curr->start + splitIndex - 2, curr->bufferType);
+  pieceNode *newNode = getNewPieceNode(curr->buffer, curr->start + (splitIndex - 1), curr->start + (splitIndex - 1), curr->bufferType);
+  pieceNode *rightSplit = getNewPieceNode(curr->buffer, curr->start + splitIndex, curr->end, curr->bufferType);
   if (curr->buffer[curr->start + splitIndex - 1] == '\n') {
     if (E.cy > 0) E.cy--;
     E.numrows--;
@@ -246,11 +361,16 @@ void splitNodeDelete(node *curr, int splitIndex) {
 
   front->next = leftSplit;
   back->prev = rightSplit;
+
+  newNode->next = rightSplit;
+  newNode->prev = leftSplit;
+
+  pushStack(undoHead, newNode, newNode);
 }
 
 void deleteChar (int line, int pos){
   if (line == 1 && pos == 0) return;
-  node *curr = head->next;
+  pieceNode *curr = head->next;
   int currLine = 1;
   while (curr != tail && currLine < line) {
     if (currLine + curr->linecount >= line) break;
@@ -283,6 +403,7 @@ void deleteChar (int line, int pos){
         }
         curr->prev->next = curr->next;
         curr->next->prev = curr->prev;
+        pushStack(undoHead, curr, curr);
       } else if (curr->buffer[curr->end] == '\n') {
         if (E.cy > 0) E.cy--;
         E.numrows--;
@@ -290,13 +411,30 @@ void deleteChar (int line, int pos){
         curr->lines = (int *) realloc(curr->lines, (curr->linecount - 1) * sizeof(int));
         curr->linecount--;
         curr->end--;
+
+        pieceNode *newNode = getNewPieceNode(curr->buffer, curr->end + 1, curr->end + 1, curr->bufferType);
+        newNode->next = isStackEmpty(undoHead) > 0 ? peekStack(undoHead)->frontptr : curr->next;
+        newNode->prev = curr;
+        pushStack(undoHead, newNode, newNode);
       } else {
         curr->end--;
+        stackNode *node = peekStack(undoHead);
+        if (node != NULL) {
+          pieceNode *topNode = node->frontptr;
+          if (topNode->start == curr->end + 2) {
+            topNode->start--;
+          } else {
+            pieceNode *newNode = getNewPieceNode(curr->buffer, curr->end + 1, curr->end + 1, curr->bufferType);
+            newNode->next = topNode;
+            newNode->prev = curr;
+            pushStack(undoHead, newNode, newNode);
+          }
+        }
       }
     } else { //
       splitNodeDelete(curr, splitIndex);
     }
-  } else if (offset == 0 && pos == 0) { // add new node to front of the currentNode
+  } else if (offset == 0 && pos == 0) { // delete from previous node
     curr = curr->prev;
     if (curr->end - curr->start == 0) {
       if (curr->buffer[curr->end] == '\n') {
@@ -306,6 +444,7 @@ void deleteChar (int line, int pos){
       }
       curr->prev->next = curr->next;
       curr->next->prev = curr->prev;
+      pushStack(undoHead, curr, curr);
     } else if (curr->buffer[curr->end] == '\n') {
       if (E.cy > 0) E.cy--;
       E.numrows--;
@@ -313,8 +452,24 @@ void deleteChar (int line, int pos){
       curr->lines = (int *) realloc(curr->lines, (curr->linecount - 1) * sizeof(int));
       curr->linecount--;
       curr->end--;
+      pieceNode *newNode = getNewPieceNode(curr->buffer, curr->end + 1, curr->end + 1, curr->bufferType);
+      newNode->next = isStackEmpty(undoHead) > 0 ? peekStack(undoHead)->frontptr : curr->next;
+      newNode->prev = curr;
+      pushStack(undoHead, newNode, newNode);
     } else {
       curr->end--;
+      stackNode *node = peekStack(undoHead);
+      if (node != NULL) {
+        pieceNode *topNode = node->frontptr;
+        if (topNode->start == curr->end + 2) {
+          topNode->start--;
+        } else {
+          pieceNode *newNode = getNewPieceNode(curr->buffer, curr->end + 1, curr->end + 1, curr->bufferType);
+          newNode->next = topNode;
+          newNode->prev = curr;
+          pushStack(undoHead, newNode, newNode);
+        }
+      }
     }
   } else if (offset == 0 && pos == 1) { // add new node to front of the currentNode
     if (curr->buffer[curr->start + pos] == '\n') {
@@ -327,10 +482,38 @@ void deleteChar (int line, int pos){
     } else {
       curr->start++;
     }
+    pieceNode *newNode = getNewPieceNode(curr->buffer, curr->start--, curr->start--, curr->bufferType);
+    newNode->next = curr;
+    newNode->prev = curr->prev;
+    pushStack(undoHead, newNode, newNode);
   } else { // split middle of the node
     offset += pos;
     splitNodeDelete(curr, offset);
   }
+}
+
+void undo() {
+  stackNode *node = popStack(undoHead);
+  if (node != NULL) {
+    pieceNode *frontNode = node->frontptr->prev->next;
+    pieceNode *backNode = node->backptr->next->prev;
+    pushStack(redoHead, frontNode, backNode);
+    node->frontptr->prev->next = node->frontptr;
+    node->backptr->next->prev = node->backptr;
+  }
+  E.numrows = countLines();
+}
+
+void redo() {
+  stackNode *node = popStack(redoHead);
+  if (node != NULL) {
+    pieceNode *frontNode = node->frontptr->prev->next;
+    pieceNode *backNode = node->backptr->next->prev;
+    pushStack(undoHead, frontNode, backNode);
+    node->frontptr->prev->next = node->frontptr;
+    node->backptr->next->prev = node->backptr;
+  }
+  E.numrows = countLines();
 }
 
 /*** terminal ***/
@@ -375,7 +558,8 @@ int editorReadKey() {
 
     if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
     if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
-
+    // printf("%c", seq[0]);
+    // printf("%c", seq[1]);
     if (seq[0] == '[') {
       if (seq[1] >= '0' && seq[1] <= '9') {
         if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
@@ -405,6 +589,10 @@ int editorReadKey() {
         case 'H': return HOME_KEY;
         case 'F': return END_KEY;
       }
+    } else if (seq[0] == 'b' || seq[0] == 98) {
+      return PAGE_UP;
+    } else if (seq[0] == 'f' || seq[0] == 102) {
+      return PAGE_DOWN;
     }
 
     return '\x1b';
@@ -445,7 +633,9 @@ int getWindowSize(int *rows, int *cols) {
   }
 }
 
-/*** row operations ***/
+int is_separator(int c) {
+  return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+}
 
 /*** file i/o ***/
 
@@ -461,13 +651,13 @@ void editorOpen(char *filename) {
   original = malloc (fsize + 1);
   fread (original, 1, fsize, f);
 
-  head = getNewNode ("", -1, -1, 0);
-  tail = getNewNode ("", -1, -1, 0);
+  head = getNewPieceNode ("", -1, -1, 0);
+  tail = getNewPieceNode ("", -1, -1, 0);
   head->next = tail;
   tail->prev = head;
 
-  node *curr = head;
-  node *newNode = getNewNode (original, 0, fsize - 1, 0);
+  pieceNode *curr = head;
+  pieceNode *newNode = getNewPieceNode (original, 0, fsize - 1, 0);
   newNode->next = curr->next;
   newNode->prev = curr;
   curr->next->prev = newNode;	//newNode will be the previous node of temp->next node
@@ -490,7 +680,7 @@ void editorSave() {
   FILE *fp = fopen(E.filename, "w+");
   if (fp != NULL) {
     int fileByteSize = 0;
-    node *curr = head;
+    pieceNode *curr = head;
     while (curr != tail) {
       fprintf(fp, "%.*s", curr->end - curr->start + 1, curr->start + curr->buffer);
       if (curr != head) fileByteSize += curr->end - curr->start + 1;
@@ -506,13 +696,6 @@ void editorSave() {
 
 /*** append buffer ***/
 
-struct abuf {
-  char *b;
-  int len;
-};
-
-#define ABUF_INIT {NULL, 0}
-
 void abAppend(struct abuf *ab, const char *s, int len) {
   char *new = realloc(ab->b, ab->len + len);
   //printf ("[%c, %d]", s[0], len);
@@ -527,7 +710,7 @@ void abFree(struct abuf *ab) {
 }
 
 void printlines(struct abuf *ab, int topLine, int botLine) {
-  node *curr = head->next;
+  pieceNode *curr = head->next;
   int currLine = 1;
   while (curr != tail && currLine < topLine) {
     if (currLine + curr->linecount >= topLine) break;
@@ -627,6 +810,7 @@ void editorDrawRows(struct abuf *ab) {
 void editorDrawStatusBar(struct abuf *ab) {
   abAppend(ab, "\x1b[7m", 4);
   char status[80], rstatus[80];
+
   int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
     E.filename ? E.filename : "[No Name]", E.numrows, E.dirty ? "(modified)" : "");
   int rightLen = snprintf(rstatus, sizeof(rstatus), "[%d, %d]", E.cy + 1, E.cx);
@@ -641,6 +825,7 @@ void editorDrawStatusBar(struct abuf *ab) {
       len++;
     }
   }
+
   abAppend(ab, "\x1b[m", 3);
   abAppend(ab, "\r\n", 2);
 }
@@ -745,6 +930,22 @@ void editorProcessKeypress() {
       editorSave();
       break;
 
+    case CTRL_KEY('u'):
+      undo();
+      if (E.cy > E.numrows - 1) {
+        E.cy = E.numrows - 1;
+      }
+      E.cx = 0;
+      break;
+
+    case CTRL_KEY('r'):
+      redo();
+      if (E.cy > E.numrows - 1) {
+        E.cy = E.numrows - 1;
+        E.cx = 0;
+      }
+      break;
+
     case 27:
       break;
 
@@ -757,16 +958,23 @@ void editorProcessKeypress() {
       break;
 
     case BACKSPACE:
+      //printf("blep");
       deleteChar(E.cy + 1, E.cx);
       if (E.cx > 0) E.cx--;
       break;
 
     case PAGE_UP:
     case PAGE_DOWN:
+      //printf("derp");
       {
+        if (c == PAGE_UP) {
+          E.cy = E.rowoff;
+        } else if (c == PAGE_DOWN) {
+          E.cy = E.rowoff + E.screenrows - 1;
+          if (E.cy > E.numrows) E.cy = E.numrows;
+        }
         int times = E.screenrows;
-        while (times--)
-          editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        while (times--) editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
       }
       break;
 
@@ -853,17 +1061,28 @@ int main(int argc, char *argv[]) {
   //printf ("[done]");
   enableRawMode();
   initEditor();
+
+  undoHead = getNewStackNode(NULL, NULL);
+  undoTail = getNewStackNode(NULL, NULL);
+  undoHead->next = undoTail;
+  undoTail->prev = undoHead;
+
+  redoHead = getNewStackNode(NULL, NULL);
+  redoTail = getNewStackNode(NULL, NULL);
+  redoHead->next = redoTail;
+  redoTail->prev = redoHead;
+
   if (argc >= 2) {
     editorOpen(argv[1]);
   } else {
     original = "\n";
-    head = getNewNode ("", -1, -1, 0);
-    tail = getNewNode ("", -1, -1, 0);
+    head = getNewPieceNode ("", -1, -1, 0);
+    tail = getNewPieceNode ("", -1, -1, 0);
     head->next = tail;
     tail->prev = head;
 
-    node *curr = head;
-    node *newNode = getNewNode (original, 0, 0, 0);
+    pieceNode *curr = head;
+    pieceNode *newNode = getNewPieceNode (original, 0, 0, 0);
     newNode->next = curr->next;
     newNode->prev = curr;
     curr->next->prev = newNode;	//newNode will be the previous node of temp->next node
