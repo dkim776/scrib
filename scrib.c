@@ -319,8 +319,10 @@ void insertChar (int line, int pos){
       curr->next->prev = newNode;
       curr->next = newNode;
       pushStack(undoHead, newNode, newNode);
+      E.dirty++;
     } else {
       splitNode(curr, splitIndex);
+      E.dirty++;
     }
   } else if (offset == 0 && pos == 0) {
     pieceNode *deepCopy = getNewPieceNode(curr->buffer, curr->start, curr->end, curr->bufferType);
@@ -334,9 +336,11 @@ void insertChar (int line, int pos){
     curr->prev = newNode;
 
     pushStack(undoHead, deepCopy, deepCopy);
+    E.dirty++;
   } else {
     offset += pos;
     splitNode(curr, offset);
+    E.dirty++;
   }
   bufferIndex++;
 }
@@ -404,6 +408,7 @@ void deleteChar (int line, int pos){
         curr->prev->next = curr->next;
         curr->next->prev = curr->prev;
         pushStack(undoHead, curr, curr);
+        E.dirty++;
       } else if (curr->buffer[curr->end] == '\n') {
         if (E.cy > 0) E.cy--;
         E.numrows--;
@@ -416,6 +421,7 @@ void deleteChar (int line, int pos){
         newNode->next = isStackEmpty(undoHead) > 0 ? peekStack(undoHead)->frontptr : curr->next;
         newNode->prev = curr;
         pushStack(undoHead, newNode, newNode);
+        E.dirty++;
       } else {
         curr->end--;
         stackNode *node = peekStack(undoHead);
@@ -428,11 +434,13 @@ void deleteChar (int line, int pos){
             newNode->next = topNode;
             newNode->prev = curr;
             pushStack(undoHead, newNode, newNode);
+            E.dirty++;
           }
         }
       }
     } else { //
       splitNodeDelete(curr, splitIndex);
+      E.dirty++;
     }
   } else if (offset == 0 && pos == 0) { // delete from previous node
     curr = curr->prev;
@@ -456,6 +464,7 @@ void deleteChar (int line, int pos){
       newNode->next = isStackEmpty(undoHead) > 0 ? peekStack(undoHead)->frontptr : curr->next;
       newNode->prev = curr;
       pushStack(undoHead, newNode, newNode);
+      E.dirty++;
     } else {
       curr->end--;
       stackNode *node = peekStack(undoHead);
@@ -468,6 +477,7 @@ void deleteChar (int line, int pos){
           newNode->next = topNode;
           newNode->prev = curr;
           pushStack(undoHead, newNode, newNode);
+          E.dirty++;
         }
       }
     }
@@ -486,9 +496,11 @@ void deleteChar (int line, int pos){
     newNode->next = curr;
     newNode->prev = curr->prev;
     pushStack(undoHead, newNode, newNode);
+    E.dirty++;
   } else { // split middle of the node
     offset += pos;
     splitNodeDelete(curr, offset);
+    E.dirty++;
   }
 }
 
@@ -500,6 +512,7 @@ void undo() {
     pushStack(redoHead, frontNode, backNode);
     node->frontptr->prev->next = node->frontptr;
     node->backptr->next->prev = node->backptr;
+    E.dirty--;
   }
   E.numrows = countLines();
 }
@@ -512,6 +525,7 @@ void redo() {
     pushStack(undoHead, frontNode, backNode);
     node->frontptr->prev->next = node->frontptr;
     node->backptr->next->prev = node->backptr;
+    E.dirty++;
   }
   E.numrows = countLines();
 }
@@ -993,7 +1007,6 @@ void editorProcessKeypress() {
       }
       added[bufferIndex] = c;
       insertChar(E.cy + 1, E.cx);
-      E.dirty++;
       if (c == '\n') {
         E.cx = 0;
         E.cy++;
